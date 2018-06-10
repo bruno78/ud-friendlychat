@@ -44,6 +44,12 @@ import com.google.android.gms.tasks.OnCompleteListener;
 import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.OnSuccessListener;
 import com.google.android.gms.tasks.Task;
+import com.google.firebase.appindexing.Action;
+import com.google.firebase.appindexing.FirebaseAppIndex;
+import com.google.firebase.appindexing.FirebaseUserActions;
+import com.google.firebase.appindexing.Indexable;
+import com.google.firebase.appindexing.builders.Indexables;
+import com.google.firebase.appindexing.builders.PersonBuilder;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.database.ChildEventListener;
@@ -74,6 +80,8 @@ public class MainActivity extends AppCompatActivity {
     private static final int RC_SIGN_IN = 101;
     private static final int RC_PHOTO_PICKER = 102;
     private static final String FRIENDLY_MSG_LENGTH_KEY = "friendly_msg_length";
+
+    private static final String MESSAGE_URL = "https://friendlychatud.firebaseio.com/messages/";
 
     // Firebase instances
     private final String MESSAGES_CHILD = "messages";
@@ -109,6 +117,7 @@ public class MainActivity extends AppCompatActivity {
         mFirebaseDatabase = FirebaseDatabase.getInstance();
         mFirebaseAuth = FirebaseAuth.getInstance();
         mFirebaseStorage = FirebaseStorage.getInstance();
+        mFirebaseRemoteConfig = FirebaseRemoteConfig.getInstance();
 
 
         // mFirebaseDatabase.getReference() refers to the root node.
@@ -174,6 +183,15 @@ public class MainActivity extends AppCompatActivity {
 
                 // Push first because you need a new id generated for each message, then set value for this id.
                 mMessagesDatabaseReference.push().setValue(friendlyMessage);
+
+                // Add indexing to the new message
+                if (friendlyMessage.getText() != null) {
+                    FirebaseAppIndex.getInstance()
+                            .update(getMessageIndexable(friendlyMessage));
+                }
+
+                // log a view action on it
+                FirebaseUserActions.getInstance().end(getMessageViewAction(friendlyMessage));
 
                 // Clear input box
                 mMessageEditText.setText("");
@@ -358,6 +376,8 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void onChildAdded(@NonNull DataSnapshot dataSnapshot, @Nullable String s) {
                     FriendlyMessage friendlyMessage = dataSnapshot.getValue(FriendlyMessage.class);
+                    // adding the id for Indexing
+                    // friendlyMessage.setId(dataSnapshot.getKey());
                     mMessageAdapter.add(friendlyMessage);
                 }
 
@@ -393,5 +413,38 @@ public class MainActivity extends AppCompatActivity {
             mChildEventListener = null;
         }
 
+    }
+
+    // Any time a user sends a message from their device, you can add that message to the on-device
+    // index for future discoverability through the Google app.
+    private Indexable getMessageIndexable(FriendlyMessage friendlyMessage) {
+        PersonBuilder sender = Indexables.personBuilder()
+                .setIsSelf(mUsername.equals(friendlyMessage.getName()))
+                .setName(friendlyMessage.getName())
+                .setUrl(MESSAGE_URL.concat(friendlyMessage.getName() + "/sender"));
+
+        PersonBuilder recipient = Indexables.personBuilder()
+                .setName(mUsername)
+                .setUrl(MESSAGE_URL.concat(friendlyMessage.getName() + "/recipient"));
+
+        Indexable messageToIndex = Indexables.messageBuilder()
+                .setName(friendlyMessage.getText())
+                .setUrl(MESSAGE_URL.concat(friendlyMessage.getName()))
+                .setSender(sender)
+                .setRecipient(recipient)
+                .build();
+
+        return messageToIndex;
+    }
+
+    // Logging user actions on personal content, such as viewing messages, needs to be marked
+    // with the upload attribute set to false in the Metadata object of the Action.
+    // This ensures user action activity on personal content remains on the device,
+    // and will not be uploaded to Google servers.
+    private Action getMessageViewAction(FriendlyMessage friendlyMessage) {
+        return new Action.Builder(Action.Builder.VIEW_ACTION)
+                .setObject(friendlyMessage.getName(), MESSAGE_URL.concat(friendlyMessage.getName()))
+                .setMetadata(new Action.Metadata.Builder().setUpload(false))
+                .build();
     }
 }

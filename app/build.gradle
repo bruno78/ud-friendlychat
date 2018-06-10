@@ -45,6 +45,7 @@ dependencies {
     compile 'com.google.firebase:firebase-storage:16.0.1' // Storage - allow to save images
     compile 'com.google.firebase:firebase-messaging:17.0.0' // Notifications
     compile 'com.google.firebase:firebase-config:16.0.0' // Remote config
+    compile 'com.google.firebase:firebase-appindexing:15.0.1' // Indexing to make messages searchable across the device
 
     // Firebase UI
     compile 'com.firebaseui:firebase-ui-auth:4.0.1'
