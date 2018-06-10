@@ -15,11 +15,18 @@
  */
 package com.google.firebase.udacity.friendlychat;
 
+import android.content.Intent;
+import android.content.IntentSender;
+import android.net.Uri;
 import android.os.Bundle;
+import android.support.annotation.NonNull;
+import android.support.annotation.Nullable;
 import android.support.v7.app.AppCompatActivity;
 import android.text.Editable;
 import android.text.InputFilter;
+import android.text.Spanned;
 import android.text.TextWatcher;
+import android.util.Log;
 import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MenuItem;
@@ -29,9 +36,33 @@ import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.ListView;
 import android.widget.ProgressBar;
+import android.widget.Toast;
+
+import com.firebase.ui.auth.AuthUI;
+import com.google.android.gms.tasks.Continuation;
+import com.google.android.gms.tasks.OnCompleteListener;
+import com.google.android.gms.tasks.OnFailureListener;
+import com.google.android.gms.tasks.OnSuccessListener;
+import com.google.android.gms.tasks.Task;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseUser;
+import com.google.firebase.database.ChildEventListener;
+import com.google.firebase.database.DataSnapshot;
+import com.google.firebase.database.DatabaseError;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.remoteconfig.FirebaseRemoteConfig;
+import com.google.firebase.remoteconfig.FirebaseRemoteConfigSettings;
+import com.google.firebase.storage.FirebaseStorage;
+import com.google.firebase.storage.StorageReference;
+import com.google.firebase.storage.StorageTask;
+import com.google.firebase.storage.UploadTask;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -39,6 +70,14 @@ public class MainActivity extends AppCompatActivity {
 
     public static final String ANONYMOUS = "anonymous";
     public static final int DEFAULT_MSG_LENGTH_LIMIT = 1000;
+
+    private static final int RC_SIGN_IN = 101;
+    private static final int RC_PHOTO_PICKER = 102;
+    private static final String FRIENDLY_MSG_LENGTH_KEY = "friendly_msg_length";
+
+    // Firebase instances
+    private final String MESSAGES_CHILD = "messages";
+    private final String CHAT_PHOTOS_FOLDER = "chat_photos";
 
     private ListView mMessageListView;
     private MessageAdapter mMessageAdapter;
@@ -49,12 +88,32 @@ public class MainActivity extends AppCompatActivity {
 
     private String mUsername;
 
+    // Firebase instance variables
+    private FirebaseDatabase mFirebaseDatabase; // Realtime database
+    private DatabaseReference mMessagesDatabaseReference;
+    private ChildEventListener mChildEventListener; // Listen for changes in the database
+    private FirebaseAuth mFirebaseAuth; // Handles the authentication
+    private FirebaseAuth.AuthStateListener mAuthStateListener; // Listen for changing of state
+    private FirebaseStorage mFirebaseStorage;
+    private StorageReference mChatPhotosStorageReference;
+    private FirebaseRemoteConfig mFirebaseRemoteConfig;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
         mUsername = ANONYMOUS;
+
+        // Firebase components
+        mFirebaseDatabase = FirebaseDatabase.getInstance();
+        mFirebaseAuth = FirebaseAuth.getInstance();
+        mFirebaseStorage = FirebaseStorage.getInstance();
+
+
+        // mFirebaseDatabase.getReference() refers to the root node.
+        mMessagesDatabaseReference = mFirebaseDatabase.getReference().child(MESSAGES_CHILD);
+        mChatPhotosStorageReference = mFirebaseStorage.getReference().child(CHAT_PHOTOS_FOLDER);
 
         // Initialize references to views
         mProgressBar = (ProgressBar) findViewById(R.id.progressBar);
@@ -75,7 +134,12 @@ public class MainActivity extends AppCompatActivity {
         mPhotoPickerButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                // TODO: Fire an intent to show an image picker
+                // Fire an intent to show an image picker
+                Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                intent.setType("image/*");
+                intent.putExtra(Intent.EXTRA_LOCAL_ONLY, true);
+                startActivityForResult(Intent.createChooser(intent,
+                        "Complete action using"), RC_PHOTO_PICKER);
             }
         });
 
@@ -104,14 +168,97 @@ public class MainActivity extends AppCompatActivity {
         mSendButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                // TODO: Send messages on click
+                // Send messages on click
+                FriendlyMessage friendlyMessage =
+                        new FriendlyMessage(mMessageEditText.getText().toString(), mUsername, null);
+
+                // Push first because you need a new id generated for each message, then set value for this id.
+                mMessagesDatabaseReference.push().setValue(friendlyMessage);
 
                 // Clear input box
                 mMessageEditText.setText("");
             }
         });
+
+
+        mAuthStateListener = new FirebaseAuth.AuthStateListener() {
+            @Override
+            public void onAuthStateChanged(@NonNull FirebaseAuth firebaseAuth) {
+
+                FirebaseUser user = firebaseAuth.getCurrentUser();
+
+                if (user != null) {
+                    // user is signed in
+                    Toast.makeText(MainActivity.this,
+                            "Welcome to FriendlyChat!", Toast.LENGTH_LONG).show();
+                    onSignedInInitialize(user.getDisplayName());
+                }
+                else {
+                    // user is signed out
+                    onSignedOutCleanup();
+                    // This will build a sign in Activity automatically with Email and google sign in
+                    // features. 
+                    startActivityForResult(
+                            AuthUI.getInstance()
+                                    .createSignInIntentBuilder()
+                                    .setIsSmartLockEnabled(false) // save users credentials and automatically signs in.
+                                    .setAvailableProviders(Arrays.asList(
+                                            new AuthUI.IdpConfig.EmailBuilder().build(),
+                                            new AuthUI.IdpConfig.GoogleBuilder().build()))
+                                    .build(),
+                            RC_SIGN_IN);
+
+                }
+
+            }
+        };
+
+        // Setting up Remote Config
+        // This is only set for Development mode. the BuildConfig.DEBUG is set to true for Development
+        // mode and false for release.
+        FirebaseRemoteConfigSettings configSettings = new FirebaseRemoteConfigSettings.Builder()
+                .setDeveloperModeEnabled(BuildConfig.DEBUG)
+                .build();
+        mFirebaseRemoteConfig.setConfigSettings(configSettings);
+        Map<String, Object> defaultConfigMap = new HashMap<>();
+        defaultConfigMap.put(FRIENDLY_MSG_LENGTH_KEY, DEFAULT_MSG_LENGTH_LIMIT);
+        mFirebaseRemoteConfig.setDefaults(defaultConfigMap);
+
+        // fetch the values from the server to see if any of the config values changed in your
+        // Firebase project
+        fetchConfig();
     }
 
+    private void fetchConfig() {
+        long cacheExpirationTime = 3600; // 1 hour
+
+        if (mFirebaseRemoteConfig.getInfo().getConfigSettings().isDeveloperModeEnabled()) {
+            cacheExpirationTime = 0;
+        }
+
+        mFirebaseRemoteConfig.fetch(cacheExpirationTime)
+                .addOnSuccessListener(new OnSuccessListener<Void>() {
+                    @Override
+                    public void onSuccess(Void aVoid) {
+                        mFirebaseRemoteConfig.activateFetched();
+                        applyRetrievedLengthLimit();
+                    }
+                })
+                .addOnFailureListener(new OnFailureListener() {
+                    @Override
+                    public void onFailure(@NonNull Exception e) {
+                        Log.w(TAG, "Error fetching config", e);
+                        applyRetrievedLengthLimit();
+                    }
+                });
+    }
+
+    private void applyRetrievedLengthLimit() {
+        Long friendly_msg_length = mFirebaseRemoteConfig.getLong(FRIENDLY_MSG_LENGTH_KEY);
+        mMessageEditText.setFilters(new InputFilter[]{
+                new InputFilter.LengthFilter(friendly_msg_length.intValue())});
+        Log.d(TAG, FRIENDLY_MSG_LENGTH_KEY + " = " + friendly_msg_length);
+    }
     @Override
     public boolean onCreateOptionsMenu(Menu menu) {
         MenuInflater inflater = getMenuInflater();
@@ -121,6 +268,130 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
-        return super.onOptionsItemSelected(item);
+        switch (item.getItemId()) {
+            case R.id.sign_out_menu:
+                // sign out
+                AuthUI.getInstance().signOut(this);
+                return true;
+            default:
+                return super.onOptionsItemSelected(item);
+        }
+    }
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == RC_SIGN_IN) {
+            if (resultCode == RESULT_OK) {
+                Toast.makeText(this,
+                        "Signed in, successfully!", Toast.LENGTH_SHORT).show();
+            }
+            else if (resultCode == RESULT_CANCELED) {
+                Toast.makeText(this, "Sign in canceled!", Toast.LENGTH_SHORT).show();
+                finish();
+            }
+        }
+        else if (requestCode == RC_PHOTO_PICKER && resultCode == RESULT_OK) {
+            final Uri selectedImageUri = data.getData();
+
+            // Get a reference to store file at chat_photos/<FILENAME>
+            final StorageReference photoRef =
+                    mChatPhotosStorageReference.child(selectedImageUri.getLastPathSegment());
+
+            // Upload file to Firebase Storage
+            photoRef.putFile(selectedImageUri).continueWithTask(new Continuation<UploadTask.TaskSnapshot, Task<Uri>>() {
+                @Override
+                public Task<Uri> then(@NonNull Task<UploadTask.TaskSnapshot> task) throws Exception {
+                    if (!task.isSuccessful()) {
+                        throw task.getException();
+                    }
+                    return photoRef.getDownloadUrl();
+                }
+            }).addOnCompleteListener(new OnCompleteListener<Uri>() {
+                @Override
+                public void onComplete(@NonNull Task<Uri> task) {
+                    if (task.isSuccessful()) {
+                        Uri downloadUri = task.getResult();
+                        FriendlyMessage friendlyMessage = new FriendlyMessage(null, mUsername, downloadUri.toString());
+                        mMessagesDatabaseReference.push().setValue(friendlyMessage);
+                    } else {
+                        Toast.makeText(MainActivity.this, "upload failed: " + task.getException().getMessage(), Toast.LENGTH_SHORT).show();
+                    }
+                }
+            });
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (mChildEventListener != null) {
+            mFirebaseAuth.removeAuthStateListener(mAuthStateListener);
+        }
+        mMessageAdapter.clear();
+        detachDatabaseReadListener();
+    }
+
+    @Override
+    protected  void onResume() {
+        super.onResume();
+        mFirebaseAuth.addAuthStateListener(mAuthStateListener);
+    }
+
+    private void onSignedInInitialize(String displayName) {
+        mUsername = displayName;
+        attachDatabaseReadListener();
+    }
+
+
+    private void onSignedOutCleanup() {
+        mUsername = ANONYMOUS;
+        mMessageAdapter.clear();
+        detachDatabaseReadListener();
+    }
+
+    private void attachDatabaseReadListener() {
+
+        if (mChildEventListener == null) {
+            // Create a listener to listens for changes in the database
+            mChildEventListener = new ChildEventListener() {
+                @Override
+                public void onChildAdded(@NonNull DataSnapshot dataSnapshot, @Nullable String s) {
+                    FriendlyMessage friendlyMessage = dataSnapshot.getValue(FriendlyMessage.class);
+                    mMessageAdapter.add(friendlyMessage);
+                }
+
+                @Override
+                public void onChildChanged(@NonNull DataSnapshot dataSnapshot, @Nullable String s) {
+
+                }
+
+                @Override
+                public void onChildRemoved(@NonNull DataSnapshot dataSnapshot) {
+
+                }
+
+                @Override
+                public void onChildMoved(@NonNull DataSnapshot dataSnapshot, @Nullable String s) {
+
+                }
+
+                // This is called when user is not allowed to make changes on the data. Usually permission
+                // issues.
+                @Override
+                public void onCancelled(@NonNull DatabaseError databaseError) {
+
+                }
+            };
+            mMessagesDatabaseReference.addChildEventListener(mChildEventListener);
+        }
+    }
+
+    private void detachDatabaseReadListener() {
+        if (mChildEventListener != null) {
+            mMessagesDatabaseReference.removeEventListener(mChildEventListener);
+            mChildEventListener = null;
+        }
+
     }
 }
